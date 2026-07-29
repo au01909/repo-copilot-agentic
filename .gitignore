@@ -1,0 +1,69 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.Python
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+ENV/
+
+# --- Environment / secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Local data this app actually creates at runtime ---
+# SQLite session store (backend/app/persistence.py, config.SQLITE_PATH)
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Qdrant embedded local storage (config.QDRANT_PATH, qdrant_local mode)
+qdrant_data/
+
+# MLflow local tracking store + artifacts (config.MLFLOW_TRACKING_URI)
+mlflow.db
+mlruns/
+mlartifacts/
+
+# DeepEval's local cache dir (created by requirements-eval.txt's deepeval package)
+.deepeval/
+.deepeval_telemetry.txt
+
+# --- Testing ---
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# --- Repo clones ---
+# app/ingest.py clones repositories into tempfile.mkdtemp() (outside the repo,
+# not here) — but if you ever point CLONE_TIMEOUT/local testing at an in-repo
+# path instead, ignore it:
+/tmp_repos/
+/clones/
+
+# --- Docker ---
+# (nothing generated locally by `docker compose up` needs ignoring here —
+# named volumes live in Docker's own storage, not the repo)
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- Node (frontend is currently a single static index.html with no build
+# step, but ignore these preemptively in case that changes) ---
+node_modules/
+npm-debug.log*
+dist/

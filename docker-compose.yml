@@ -1,0 +1,71 @@
+# Not executed/verified in the sandbox this was built in (no Docker daemon
+# available there) — reviewed by hand against the Dockerfile and app config,
+# but treat this as a real-but-unverified artifact until you run it yourself.
+#
+# Usage:
+#   cp backend/.env.example backend/.env   # fill in whichever provider you want
+#   docker compose up --build
+#
+# Then: http://localhost:8000/api/health
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    ports:
+      - "6333:6333"   # exposed for local debugging via Qdrant's dashboard;
+                       # remove this in production (see docs/DEPLOYMENT.md)
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:6333/healthz')\" || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_data:/mlflow
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --default-artifact-root /mlflow/artifacts
+      --host 0.0.0.0
+      --port 5000
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      # override file-based defaults to use the sibling containers instead
+      - VECTOR_STORE=qdrant_server
+      - QDRANT_URL=http://qdrant:6333
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    volumes:
+      - backend_data:/app/data
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+
+volumes:
+  qdrant_data:
+  mlflow_data:
+  backend_data:

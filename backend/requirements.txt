@@ -1,0 +1,46 @@
+fastapi>=0.110
+uvicorn>=0.29
+pydantic>=2.6
+python-dotenv>=1.0
+
+# retrieval
+rank-bm25>=0.2.2
+scikit-learn>=1.4
+qdrant-client>=1.9
+networkx>=3.2
+
+# multi-language code-aware chunking
+tree-sitter==0.21.3
+tree-sitter-languages>=1.10
+
+# LLM providers (OpenAI client also used for NVIDIA NIM / DeepSeek, which
+# expose OpenAI-compatible endpoints)
+anthropic>=0.34.0
+openai>=1.30
+
+# reranking
+cohere>=5.5
+
+# GitHub integration
+requests>=2.31
+
+# Agentic platform: LangChain retrieval layer + LangGraph orchestration
+langchain-core>=1.5
+langgraph>=0.4,<0.5   # pinned: langgraph 1.x's API differs; this codebase is tested against 0.4.x
+
+# ChatNVIDIA (NVIDIA AI Endpoints) — no self-hosted model
+langchain-nvidia-ai-endpoints>=0.3
+
+# Google ADK Repository Agent (needs the [extensions] litellm integration for
+# non-Gemini models, since we use it with ChatNVIDIA/NVIDIA NIM)
+google-adk[extensions]>=2.0
+
+# Experiment tracking (local SQLite by default, no server required)
+mlflow>=3.0
+
+# Tracing — activated purely via LANGCHAIN_TRACING_V2/LANGCHAIN_API_KEY env vars
+langsmith>=0.10
+
+# Testing
+pytest>=8.0
+httpx>=0.27

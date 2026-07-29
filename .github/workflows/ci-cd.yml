@@ -1,0 +1,92 @@
+# Not run in the sandbox this was authored in — there's no GitHub Actions
+# runner available there. This mirrors exactly the commands actually verified
+# locally in this session (`pip install -r requirements.txt` into a clean
+# venv, `pytest tests/`) plus a Docker build step that's syntactically valid
+# but unbuilt here (no Docker daemon in that sandbox either — see
+# docs/DEPLOYMENT.md). Review before relying on it; the `deploy` job in
+# particular needs real secrets configured in your repo settings.
+name: CI/CD
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Real unit/integration tests, but no calls to paid LLM APIs — the test
+      # suite deliberately exercises the extractive/direct-workflow fallback
+      # paths (no NVIDIA_API_KEY / ANTHROPIC_API_KEY set here), which is
+      # exactly what "mock external LLM calls" means for this codebase: the
+      # app's own no-key fallback IS the mock, not a separate test double.
+      - name: Run tests
+        run: pytest tests/ -v
+        env:
+          ENABLE_MLFLOW: "false"
+
+  build-image:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t repo-copilot-backend:${{ github.sha }} ./backend
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: build-image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Requires these repo secrets to be set (Settings -> Secrets and
+      # variables -> Actions) before this job can actually run:
+      #   GCP_PROJECT_ID, GCP_REGION, GCP_WORKLOAD_IDENTITY_PROVIDER,
+      #   GCP_SERVICE_ACCOUNT
+      # See docs/DEPLOYMENT.md for how those map to `gcloud` setup steps.
+      # This job is intentionally left as a documented template rather than
+      # wired to real credentials, since none exist in the environment this
+      # was authored in.
+      - name: Authenticate to Google Cloud
+        if: ${{ vars.GCP_PROJECT_ID != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Build and push to Artifact Registry
+        if: ${{ vars.GCP_PROJECT_ID != '' }}
+        run: |
+          gcloud auth configure-docker ${{ vars.GCP_REGION }}-docker.pkg.dev --quiet
+          docker build -t ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/repo-copilot/backend:${{ github.sha }} ./backend
+          docker push ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/repo-copilot/backend:${{ github.sha }}
+
+      - name: Deploy to Cloud Run
+        if: ${{ vars.GCP_PROJECT_ID != '' }}
+        run: |
+          gcloud run deploy repo-copilot-backend \
+            --image=${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/repo-copilot/backend:${{ github.sha }} \
+            --region=${{ vars.GCP_REGION }} \
+            --platform=managed
+
+      - name: Skip (no GCP project configured)
+        if: ${{ vars.GCP_PROJECT_ID == '' }}
+        run: echo "GCP_PROJECT_ID repo variable not set — skipping deploy. See docs/DEPLOYMENT.md."

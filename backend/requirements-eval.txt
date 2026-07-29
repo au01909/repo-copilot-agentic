@@ -1,0 +1,13 @@
+# Optional: RAGAS / DeepEval-based evaluation (RAGAS/DeepEval faithfulness,
+# context precision/recall, answer relevancy, hallucination). Not required for
+# the core copilot — only needed to hit /api/eval/ragas or /api/eval/deepeval.
+#
+# Known issue: ragas's dependency chain (via langchain-community) can fail to
+# import cleanly depending on installed versions:
+#   ModuleNotFoundError: No module named 'langchain_community.chat_models.vertexai'
+# If you hit this, try: pip install "langchain-community>=0.3" --upgrade
+# or pin ragas to a release compatible with your other installed packages.
+
+deepeval>=4.0
+ragas>=0.2
+datasets>=2.19
