@@ -81,9 +81,14 @@ Frontend (static, unchanged)
    Grounded Answer + Citations (file:start-end, commit SHA, author)
 ```
 
-`/api/chat` is the agentic entry point described above. `/api/query` (pre-existing)
-still works exactly as before — it calls the retrieval+generation path directly
-without going through LangGraph, for callers that don't need agentic routing.
+`/api/chat` is the agentic entry point described above. `/api/query` calls the
+retrieval+generation path directly without going through LangGraph, for callers
+that don't need agentic routing. It's now the *only* retrieval-QA HTTP endpoint —
+the earlier `/api/query/stream` (SSE) duplicated the same retrieval/prompt/provider
+logic and had drifted out of sync with `/api/query`, so it was removed rather than
+kept parallel. `/api/query` is also plan-aware: `planner.plan(question)` actively
+shapes retrieval (source-boosted ranking, plan-aware query expansion and reranking)
+instead of only being reported back for debugging — see [API reference](#api-reference).
 
 ---
 
@@ -121,13 +126,14 @@ uvicorn app.main:app --reload --port 8000
 ```
 
 Verified fresh: `pip install -r requirements.txt` into a **clean, empty virtualenv**
-(not just this already-loaded sandbox) produced a fully working app with all 27 tests
-passing — see [Testing](#testing) below.
+(not just this already-loaded sandbox) produced a fully working app — see
+[Testing](#testing) below for the current pass/fail count, which has changed since
+that clean-venv run and hasn't been re-verified there yet.
 
 With no `.env` filled in at all, the app still answers questions: retrieval runs on
 BM25 + TF-IDF (no key needed), `/api/chat` automatically falls back from
 `AGENT_FRAMEWORK=adk` to the direct LangGraph workflow (since ADK's model needs a
-`NVIDIA_API_KEY` to plan tool calls), and answers come back in extractive mode —
+`NVIDIA_NIM_API_KEY` to plan tool calls), and answers come back in extractive mode —
 labeled as such, not silently degraded.
 
 Open `frontend/index.html` (unchanged from the existing hybrid-RAG build) and point it
@@ -139,7 +145,7 @@ See `backend/.env.example` for the full list. The two provider paths that matter
 
 ```bash
 # Agentic path (ADK + ChatNVIDIA) — needs this to do real tool-calling:
-NVIDIA_API_KEY=nvapi-...
+NVIDIA_NIM_API_KEY=nvapi-...
 LLM_MODEL=nvidia/nemotron-3-ultra-550b-a55b
 AGENT_FRAMEWORK=adk
 
@@ -161,12 +167,29 @@ code execution, evaluation — see inline FastAPI docs at `/docs` once running).
 in this pass:
 
 ```
+POST /api/query
+  { "session_id": "...", "question": "What does this repository do?", "top_k": 5 }
+  → { answer, citations[], mode, retrieved_chunks, llm_debug, plan_sources[],
+      retrieval_strategy, boosted_files[] }
+
+  Retrieval is plan-aware: planner.plan(question) actively boosts fused
+  BM25+dense scores toward the files that intent needs (README/docs for a
+  repository-summary question, architecture docs + entrypoints for an
+  architecture question, Dockerfile/deploy docs for a deployment question,
+  etc.) instead of only reporting plan_sources for debugging. Boosting never
+  hard-filters — a plan-preferred source with no matches falls back to plain
+  hybrid search rather than returning empty results. retrieval_strategy and
+  boosted_files report which files, if any, were actually boosted for this
+  query. This is the only retrieval-QA endpoint — the earlier SSE
+  `/api/query/stream` was removed; it duplicated this same pipeline and had
+  fallen out of sync with it (no plan-awareness, different telemetry).
+
 POST /api/chat
   { "session_id": "...", "message": "How does auth work?", "top_k": 5 }
   → { answer, citations[], mode, intent, agent_framework, tool_calls[], retry_count }
 
   Tries the Google ADK Repository Agent (real tool-calling) if AGENT_FRAMEWORK=adk
-  and NVIDIA_API_KEY is set; otherwise (or on any ADK construction failure) falls
+  and NVIDIA_NIM_API_KEY is set; otherwise (or on any ADK construction failure) falls
   back to the LangGraph workflow directly. agent_framework in the response tells
   you which path actually answered.
 
@@ -198,22 +221,29 @@ cd backend
 pytest tests/ -v
 ```
 
-27 tests, covering:
+33 tests, covering:
 - Python AST + multi-file chunking (`test_retrieval.py`)
 - Hybrid search correctness and dedup (`test_retrieval.py`)
+- Plan-aware retrieval (`test_plan_aware_retrieval.py`): a repository-summary question
+  ranks README before implementation files, an architecture question ranks
+  architecture docs first, a deployment question surfaces the Dockerfile/deploy docs,
+  `search()` stays backward-compatible with no plan passed, and a plan whose preferred
+  source has no matching files falls back to plain hybrid search instead of returning
+  nothing
 - The LangChain `HybridRepoRetriever` wrapper, including metadata completeness
 - Intent classification against the spec's example questions (`test_langgraph_workflow.py`)
 - The LangGraph workflow's citations and — importantly — that its retry loop actually
   **terminates** on a genuinely empty index instead of looping forever
 - All 5 ADK tools, including a real path-traversal-blocking check
-- ADK's own graceful failure (`ADKAgentUnavailable`) with no `NVIDIA_API_KEY`
+- ADK's own graceful failure (`ADKAgentUnavailable`) with no `NVIDIA_NIM_API_KEY`
 - FastAPI endpoints end-to-end via `TestClient`: `/api/chat`'s automatic ADK→direct
   fallback, the summary endpoint (both paths), health/ready, and a 404 on an unknown
   session
 
-All 27 pass both in this sandbox and in a from-scratch clean virtualenv — the clean-venv
-run matters more, since it's the only one that actually proves `requirements.txt` is
-sufficient on its own rather than quietly relying on something already installed.
+31/33 pass in this sandbox. The 2 known failures (`test_chat_endpoint_falls_back_to_
+direct_workflow_without_nvidia_key`, `test_workflow_retry_terminates_on_empty_index`)
+predate the plan-aware-retrieval and free-tier config work in this pass and are tied to
+the ADK agent/NVIDIA_NIM_API_KEY changes above — not yet re-verified against a clean venv.
 
 CI (`.github/workflows/ci-cd.yml`) runs the same `pytest tests/` on every PR — 🔧 written
 and internally consistent with the local commands above, not run on a real GitHub
@@ -272,6 +302,15 @@ explicitly marked as unexecuted (no GCP credentials or network access to any
 throughout (NVIDIA AI Endpoints or the existing provider gateway) — Cloud Run only ever
 runs the FastAPI container, never a model.
 
+Config defaults in `backend/app/config.py` are tuned to stay inside Cloud Run's
+Always Free tier without any extra setup: `ENABLE_MULTI_QUERY` is off by default
+(each query otherwise fans out to an extra LLM call per request — the largest
+per-request cost/latency driver), and `FETCH_K`/`MAX_FILES`/`MAX_REPOSITORY_SIZE_MB`/
+`MAX_CHUNKS` are set low enough to fit a `512Mi`–`1Gi` instance. All are still
+env-overridable for larger deployments. `VECTOR_STORE=qdrant_memory` and
+`SESSION_STORE=memory` are recommended at deploy time (see `docker-compose.yml`
+for the alternative if you want a persistent Qdrant/session store instead).
+
 ---
 
 ## Security
@@ -297,7 +336,7 @@ runs the FastAPI container, never a model.
 
 - The ADK agent's actual tool-calling behavior (which tools it chooses, in what order)
   is unverified live — I confirmed the `Agent` object constructs correctly with a real
-  NVIDIA/LiteLLM model attached, but had no live `NVIDIA_API_KEY` to run an actual
+  NVIDIA/LiteLLM model attached, but had no live `NVIDIA_NIM_API_KEY` to run an actual
   conversation through it. The `direct` fallback path (LangGraph workflow, no ADK) is
   fully verified and is what answers by default without that key.
 - Docker build/run and the CI workflow are real files, not tested executions.
@@ -332,7 +371,8 @@ backend/
     observability/
       mlflow_tracking.py           per-query MLflow run logging
       langsmith_setup.py            LangSmith status check
-  tests/                              27 tests, see Testing above
+    source_boost.py                 plan -> file-boost scoring, shared by search.py + reranker.py
+  tests/                              33 tests, see Testing above
   Dockerfile / .dockerignore
 docker-compose.yml
 docs/DEPLOYMENT.md
