@@ -33,7 +33,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL")  # None -> official OpenAI endpoint
 
-NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY")
+NVIDIA_NIM_API_KEY = os.getenv("NVIDIA_NIM_API_KEY")
 NVIDIA_MODEL = os.environ.get("NVIDIA_MODEL", "meta/llama-3.1-70b-instruct")
 NVIDIA_BASE_URL = os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
 
@@ -53,13 +53,24 @@ COHERE_API_KEY = os.environ.get("COHERE_API_KEY")
 COHERE_RERANK_MODEL = os.environ.get("COHERE_RERANK_MODEL", "rerank-english-v3.0")
 
 # --- Retrieval tuning ---
-FETCH_K = int(os.environ.get("FETCH_K", "50"))
+FETCH_K = int(os.environ.get("FETCH_K", "20"))
 TOP_K = int(os.environ.get("TOP_K", "3"))
 BM25_WEIGHT = _float("BM25_WEIGHT", 1.0)
 DENSE_WEIGHT = _float("DENSE_WEIGHT", 1.0)
 MIN_BM25_SCORE = _float("MIN_BM25_SCORE", 0.0)
 MIN_DENSE_SCORE = _float("MIN_DENSE_SCORE", 0.05)
 DEDUPE_ONE_CHUNK_PER_FILE = _bool("DEDUPE_ONE_CHUNK_PER_FILE", True)
+
+# --- Plan-aware source boosting (see planner.SOURCE_FILE_PATTERNS) ---
+SOURCE_BOOST_WEIGHTS = {
+    "readme": _float("BOOST_README", 3.0),
+    "architecture": _float("BOOST_ARCHITECTURE", 2.0),
+    "api": _float("BOOST_API", 1.5),
+    "testing": _float("BOOST_TESTING", 1.0),
+    "deployment": _float("BOOST_DEPLOYMENT", 1.5),
+    "dependencies": _float("BOOST_DEPENDENCIES", 1.0),
+}
+MIN_BOOSTED_CANDIDATES = int(os.environ.get("MIN_BOOSTED_CANDIDATES", "3"))
 
 # --- Vector store ---
 VECTOR_STORE = os.environ.get("VECTOR_STORE", "qdrant_memory").lower()
@@ -78,7 +89,7 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")  # optional, raises rate limits
 
 # --- Feature flags ---
 ENABLE_CODE_EXECUTION = _bool("ENABLE_CODE_EXECUTION", False)  # off by default: arbitrary repo code execution is inherently risky
-ENABLE_MULTI_QUERY = _bool("ENABLE_MULTI_QUERY", True)
+ENABLE_MULTI_QUERY = _bool("ENABLE_MULTI_QUERY", False)  # off by default: each query fans out to an LLM call otherwise, the biggest cost/latency driver per request
 ENABLE_QUERY_EXPANSION = _bool("ENABLE_QUERY_EXPANSION", True)
 ENABLE_AGENTIC_PLANNER = _bool("ENABLE_AGENTIC_PLANNER", True)
 
@@ -107,14 +118,14 @@ LLM_FALLBACK_PROVIDER = os.environ.get("LLM_FALLBACK_PROVIDER", "").lower() or N
 AGENT_FRAMEWORK = os.environ.get("AGENT_FRAMEWORK", "adk").lower()
 # adk (Google ADK Repository Agent, default) | direct (call the LangGraph
 # workflow directly, skipping the ADK tool-calling wrapper — useful if ADK or
-# its model backend isn't configured, e.g. no NVIDIA_API_KEY)
+# its model backend isn't configured, e.g. no NVIDIA_NIM_API_KEY)
 AGENT_MAX_RETRIES = int(os.environ.get("AGENT_MAX_RETRIES", "2"))
 
 # --- Repository ingestion limits (untrusted input) ---
-MAX_REPOSITORY_SIZE_MB = int(os.environ.get("MAX_REPOSITORY_SIZE", "500"))
-MAX_FILES = int(os.environ.get("MAX_FILES", "5000"))
+MAX_REPOSITORY_SIZE_MB = int(os.environ.get("MAX_REPOSITORY_SIZE", "100"))
+MAX_FILES = int(os.environ.get("MAX_FILES", "1000"))
 MAX_FILE_SIZE = int(os.environ.get("MAX_FILE_SIZE", "500000"))
-MAX_CHUNKS = int(os.environ.get("MAX_CHUNKS", "20000"))
+MAX_CHUNKS = int(os.environ.get("MAX_CHUNKS", "8000"))
 CLONE_TIMEOUT = int(os.environ.get("CLONE_TIMEOUT", "180"))
 INDEX_TIMEOUT = int(os.environ.get("INDEX_TIMEOUT", "300"))
 

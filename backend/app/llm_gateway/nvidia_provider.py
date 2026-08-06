@@ -21,13 +21,13 @@ class NvidiaEndpointsProvider(LLMProvider):
         self._client = None  # lazy: don't import/construct without a key present
 
     def is_configured(self) -> bool:
-        return bool(config.NVIDIA_API_KEY)
+        return bool(config.NVIDIA_NIM_API_KEY)
 
     def _get_client(self):
         if self._client is not None:
             return self._client
-        if not config.NVIDIA_API_KEY:
-            raise LLMProviderError("NVIDIA_API_KEY is not set")
+        if not config.NVIDIA_NIM_API_KEY:
+            raise LLMProviderError("NVIDIA_NIM_API_KEY is not set")
         try:
             from langchain_nvidia_ai_endpoints import ChatNVIDIA
         except ImportError as e:
@@ -36,7 +36,7 @@ class NvidiaEndpointsProvider(LLMProvider):
             )
         kwargs = dict(
             model=self.model,
-            api_key=config.NVIDIA_API_KEY,
+            api_key=config.NVIDIA_NIM_API_KEY,
             temperature=config.LLM_TEMPERATURE,
             max_tokens=config.LLM_MAX_TOKENS,
             timeout=config.LLM_TIMEOUT,

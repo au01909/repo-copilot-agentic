@@ -7,7 +7,7 @@ that's the real, documented way both providers recommend integrating them.
 """
 import time
 from dataclasses import dataclass
-from typing import Iterator, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from . import config
 
@@ -40,7 +40,7 @@ def get_active_provider_debug() -> LLMDebugInfo:
     mapping = {
         "anthropic": (config.ANTHROPIC_API_KEY, config.ANTHROPIC_MODEL),
         "openai": (config.OPENAI_API_KEY, config.OPENAI_MODEL),
-        "nvidia": (config.NVIDIA_API_KEY, config.NVIDIA_MODEL),
+        "nvidia": (config.NVIDIA_NIM_API_KEY, config.NVIDIA_MODEL),
         "deepseek": (config.DEEPSEEK_API_KEY, config.DEEPSEEK_MODEL),
         "none": (None, "n/a"),
     }
@@ -63,19 +63,6 @@ def _anthropic_complete(system: str, user_msg: str) -> str:
     return "\n".join(b.text for b in response.content if getattr(b, "type", None) == "text").strip()
 
 
-def _anthropic_stream(system: str, user_msg: str) -> Iterator[str]:
-    import anthropic
-    if not config.ANTHROPIC_API_KEY:
-        raise ProviderUnavailable("ANTHROPIC_API_KEY is not set")
-    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    with client.messages.stream(
-        model=config.ANTHROPIC_MODEL, max_tokens=1000, system=system,
-        messages=[{"role": "user", "content": user_msg}],
-    ) as stream:
-        for text in stream.text_stream:
-            yield text
-
-
 def _openai_compatible_client(base_url: Optional[str], api_key: Optional[str]):
     import openai
     if not api_key:
@@ -96,22 +83,9 @@ def _openai_family_complete(base_url: Optional[str], api_key: Optional[str], mod
     return (resp.choices[0].message.content or "").strip()
 
 
-def _openai_family_stream(base_url: Optional[str], api_key: Optional[str], model: str,
-                           system: str, user_msg: str) -> Iterator[str]:
-    client = _openai_compatible_client(base_url, api_key)
-    stream = client.chat.completions.create(
-        model=model, max_tokens=1000, stream=True,
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user_msg}],
-    )
-    for chunk in stream:
-        delta = chunk.choices[0].delta.content if chunk.choices else None
-        if delta:
-            yield delta
-
-
 _PROVIDER_TABLE = {
     "openai": lambda: (config.OPENAI_BASE_URL, config.OPENAI_API_KEY, config.OPENAI_MODEL),
-    "nvidia": lambda: (config.NVIDIA_BASE_URL, config.NVIDIA_API_KEY, config.NVIDIA_MODEL),
+    "nvidia": lambda: (config.NVIDIA_BASE_URL, config.NVIDIA_NIM_API_KEY, config.NVIDIA_MODEL),
     "deepseek": lambda: (config.DEEPSEEK_BASE_URL, config.DEEPSEEK_API_KEY, config.DEEPSEEK_MODEL),
 }
 
@@ -143,18 +117,6 @@ def complete(system: str, user_msg: str) -> Tuple[str, LLMDebugInfo]:
         debug.status = "error"
         debug.error = str(e)
         raise ProviderUnavailable(str(e)) from e
-
-
-def stream(system: str, user_msg: str) -> Iterator[str]:
-    """Streaming variant. Raises ProviderUnavailable up front if unconfigured."""
-    provider = config.LLM_PROVIDER
-    if provider == "anthropic":
-        yield from _anthropic_stream(system, user_msg)
-    elif provider in _PROVIDER_TABLE:
-        base_url, api_key, model = _PROVIDER_TABLE[provider]()
-        yield from _openai_family_stream(base_url, api_key, model, system, user_msg)
-    else:
-        raise ProviderUnavailable(f"Streaming not available for provider '{provider}'")
 
 
 def is_configured() -> bool:

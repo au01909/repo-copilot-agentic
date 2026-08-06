@@ -34,15 +34,35 @@ THESAURUS = {
 }
 
 
-def expand_query(query: str) -> List[str]:
-    """Return the original query plus synonym-expanded variants."""
+# Extra search terms to fan out to when the planner identifies a source intent,
+# so retrieval isn't limited to generic thesaurus synonyms of the raw question.
+_INTENT_TERMS = {
+    "readme": ["repository purpose", "repository overview", "readme", "introduction"],
+    "architecture": ["architecture", "system design", "entry point"],
+    "api": ["api endpoint", "route handler"],
+    "testing": ["unit tests", "test suite"],
+    "deployment": ["deployment", "docker", "how to deploy"],
+    "dependencies": ["dependencies", "requirements"],
+}
+
+
+def expand_query(query: str, plan=None) -> List[str]:
+    """Return the original query plus synonym-expanded and, if a plan is given,
+    intent-expanded variants (e.g. a README-intent question also searches for
+    "repository overview" rather than only generic synonyms)."""
     lowered = query.lower()
     expansions = set()
     for term, synonyms in THESAURUS.items():
         if term in lowered:
             for syn in synonyms:
                 expansions.add(lowered.replace(term, syn))
-    return [query] + sorted(expansions)[:4]
+
+    intent_expansions = []
+    if plan is not None:
+        for source in plan.sources:
+            intent_expansions.extend(_INTENT_TERMS.get(source, []))
+
+    return [query] + intent_expansions[:4] + sorted(expansions)[:4]
 
 
 MULTI_QUERY_PROMPT = """Given the user's question about a code repository, generate \

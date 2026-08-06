@@ -61,6 +61,6 @@ def test_get_dependencies_tool(tool_context):
 
 
 def test_adk_agent_raises_clean_error_without_nvidia_key(tool_context, monkeypatch):
-    monkeypatch.setattr("app.config.NVIDIA_API_KEY", None)
+    monkeypatch.setattr("app.config.NVIDIA_NIM_API_KEY", None)
     with pytest.raises(ADKAgentUnavailable):
         build_repository_agent(tool_context)

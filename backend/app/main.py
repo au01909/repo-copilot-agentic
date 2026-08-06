@@ -1,4 +1,3 @@
-import json
 import shutil
 import time
 import uuid
@@ -7,7 +6,6 @@ from typing import Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 
 from . import (architecture_detect, chunking, code_exec, config, eval_dataset_gen,
                eval_deepeval, eval_judge, eval_ragas, eval_stub, github_integration,
@@ -204,7 +202,7 @@ def query_repository(req: QueryRequest):
         raise HTTPException(400, "Session has no indexed repositories.")
 
     plan = planner.plan(req.question)
-    retrieved = session.index.search(req.question, top_k=req.top_k)
+    retrieved = session.index.search(req.question, plan, top_k=req.top_k)
 
     repo_context = session.conversation.context_block()
     answer, citations, mode, debug = llm.generate_answer(
@@ -218,47 +216,9 @@ def query_repository(req: QueryRequest):
         answer=answer, citations=_citations_from_chunks(retrieved), mode=mode,
         retrieved_chunks=len(retrieved), llm_debug=LLMDebugResponse(**debug),
         plan_sources=plan.sources,
+        retrieval_strategy=session.index.last_retrieval_strategy,
+        boosted_files=session.index.last_boosted_files,
     )
-
-
-@app.post("/api/query/stream")
-def query_repository_stream(req: QueryRequest):
-    """Server-Sent Events: emits retrieval status, sources, then the answer
-    token-by-token (when the provider supports streaming), matching the PRD's
-    'Thinking... -> Sources -> Answer' flow."""
-    session = _get_session(req.session_id)
-    if not session.index:
-        raise HTTPException(400, "Session has no indexed repositories.")
-
-    def event_stream():
-        yield f"data: {json.dumps({'stage': 'thinking'})}\n\n"
-        retrieved = session.index.search(req.question, top_k=req.top_k)
-        sources_payload = [c.dict() for c in _citations_from_chunks(retrieved)]
-        yield f"data: {json.dumps({'stage': 'sources', 'sources': sources_payload})}\n\n"
-
-        repo_context = session.conversation.context_block()
-        full_answer = ""
-        if providers.is_configured():
-            try:
-                system = llm.SYSTEM_PROMPT
-                user_msg = llm._build_user_message(
-                    req.question, retrieved, session.conversation.history, repo_context,
-                )
-                for token in providers.stream(system, user_msg):
-                    full_answer += token
-                    yield f"data: {json.dumps({'stage': 'answer_delta', 'delta': token})}\n\n"
-            except providers.ProviderUnavailable as e:
-                full_answer = llm._extractive_answer(retrieved, reason=f"streaming failed ({e})")
-                yield f"data: {json.dumps({'stage': 'answer_delta', 'delta': full_answer})}\n\n"
-        else:
-            full_answer = llm._extractive_answer(retrieved, reason="no LLM provider configured")
-            yield f"data: {json.dumps({'stage': 'answer_delta', 'delta': full_answer})}\n\n"
-
-        session.conversation.add_turn(req.question, full_answer, [c.file for c in retrieved])
-        session_store.append_turn(req.session_id, req.question, full_answer)
-        yield f"data: {json.dumps({'stage': 'done'})}\n\n"
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 def _build_tool_context(session: Session) -> RepoToolContext:
@@ -272,7 +232,7 @@ def chat(req: ChatRequest):
     Google ADK Repository Agent first — real tool-calling, the model decides
     which of search_repository/read_repository_file/get_repository_tree/
     find_symbol/get_dependencies to call and in what order. If ADK isn't
-    configured (no NVIDIA_API_KEY) or construction fails for any reason, this
+    configured (no NVIDIA_NIM_API_KEY) or construction fails for any reason, this
     falls back to `AGENT_FRAMEWORK=direct`: the LangGraph workflow
     (intent -> retrieve -> validate -> generate -> citations) called directly,
     which is what /api/query already uses under the hood — so /api/chat always
@@ -568,7 +528,7 @@ def health():
         "active_sessions": len(SESSIONS),
         "llm_provider": config.LLM_PROVIDER,
         "agent_framework": config.AGENT_FRAMEWORK,
-        "adk_configured": bool(config.NVIDIA_API_KEY),
+        "adk_configured": bool(config.NVIDIA_NIM_API_KEY),
         "mlflow_enabled": config.ENABLE_MLFLOW,
         "langsmith": langsmith_setup.status(),
     }

@@ -69,6 +69,8 @@ class QueryResponse(BaseModel):
     retrieved_chunks: int
     llm_debug: LLMDebugResponse
     plan_sources: List[str] = []
+    retrieval_strategy: str = "hybrid_only"
+    boosted_files: List[str] = []
 
 
 class ChatRequest(BaseModel):

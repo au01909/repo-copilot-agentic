@@ -32,9 +32,9 @@ def build_repository_agent(ctx: RepoToolContext):
     Raises ADKAgentUnavailable (not a raw ADK/litellm exception) if the model
     backend isn't configured — callers should catch this and use `direct`
     mode instead of failing the request."""
-    if not config.NVIDIA_API_KEY:
+    if not config.NVIDIA_NIM_API_KEY:
         raise ADKAgentUnavailable(
-            "NVIDIA_API_KEY is not set; the ADK Repository Agent needs a "
+            "NVIDIA_NIM_API_KEY is not set; the ADK Repository Agent needs a "
             "configured model to plan tool calls. Falling back to direct "
             "workflow invocation (AGENT_FRAMEWORK=direct)."
         )
@@ -45,7 +45,7 @@ def build_repository_agent(ctx: RepoToolContext):
         raise ADKAgentUnavailable(f"google-adk is not installed: {e}")
 
     try:
-        # litellm's NVIDIA NIM provider prefix; NVIDIA_API_KEY is read by
+        # litellm's NVIDIA NIM provider prefix; NVIDIA_NIM_API_KEY is read by
         # litellm from the environment (standard litellm convention).
         model = LiteLlm(model=f"nvidia_nim/{config.LLM_MODEL}")
     except Exception as e:
@@ -78,28 +78,56 @@ def build_repository_agent(ctx: RepoToolContext):
 
 
 def run_adk_agent(ctx: RepoToolContext, question: str, session_service=None) -> Dict:
-    """Runs the ADK agent against one question and returns a plain dict
-    (answer text + whatever tool calls it made), so callers don't need to
-    depend on ADK's event/session types directly."""
+    """Runs the ADK agent and raises ADKAgentUnavailable if the agent
+    cannot be executed so callers can transparently fall back to the
+    direct workflow."""
+
     from google.adk.runners import InMemoryRunner
     from google.genai import types
 
-    agent = build_repository_agent(ctx)
-    runner = InMemoryRunner(agent=agent, app_name="repo_copilot")
+    try:
+        agent = build_repository_agent(ctx)
 
-    session = runner.session_service.create_session_sync(
-        app_name="repo_copilot", user_id="repo_copilot_user",
-    )
-    content = types.Content(role="user", parts=[types.Part(text=question)])
+        runner = InMemoryRunner(
+            agent=agent,
+            app_name="repo_copilot",
+        )
 
-    final_text = ""
-    tool_calls = []
-    for event in runner.run(user_id="repo_copilot_user", session_id=session.id, new_message=content):
-        if event.content and event.content.parts:
-            for part in event.content.parts:
-                if getattr(part, "text", None):
-                    final_text += part.text
-                if getattr(part, "function_call", None):
-                    tool_calls.append(part.function_call.name)
+        session = runner.session_service.create_session_sync(
+            app_name="repo_copilot",
+            user_id="repo_copilot_user",
+        )
 
-    return {"answer": final_text, "tool_calls": tool_calls}
+        content = types.Content(
+            role="user",
+            parts=[types.Part(text=question)],
+        )
+
+        final_text = ""
+        tool_calls = []
+
+        for event in runner.run(
+            user_id="repo_copilot_user",
+            session_id=session.id,
+            new_message=content,
+        ):
+            if event.content and event.content.parts:
+                for part in event.content.parts:
+                    if getattr(part, "text", None):
+                        final_text += part.text
+
+                    if getattr(part, "function_call", None):
+                        tool_calls.append(part.function_call.name)
+
+        return {
+            "answer": final_text,
+            "tool_calls": tool_calls,
+        }
+
+    except ADKAgentUnavailable:
+        raise
+
+    except Exception as e:
+        raise ADKAgentUnavailable(
+            f"ADK execution failed: {e}"
+        ) from e

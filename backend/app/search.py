@@ -22,6 +22,7 @@ from .embeddings import get_embedder
 from .query_expansion import expand_query, generate_multi_queries
 from .reranker import get_reranker
 from .search_tokenize import tokenize
+from .source_boost import source_boost_score
 from .vectorstore import VectorStore
 
 
@@ -92,9 +93,12 @@ class HybridSearchIndex:
         self.bm25 = BM25Index(chunks)
         self.dense = DenseIndex(chunks)
         self.reranker = get_reranker()
+        # telemetry from the most recent search() call (see main.py /api/query)
+        self.last_retrieval_strategy = "hybrid_only"
+        self.last_boosted_files: List[str] = []
 
-    def _query_variants(self, query: str) -> List[str]:
-        variants = set(expand_query(query))
+    def _query_variants(self, query: str, plan=None) -> List[str]:
+        variants = set(expand_query(query, plan))
         if config.ENABLE_MULTI_QUERY:
             variants.update(generate_multi_queries(query))
         else:
@@ -114,13 +118,38 @@ class HybridSearchIndex:
             deduped.append((idx, score))
         return deduped
 
-    def search(self, query: str, top_k: int = None, fetch_k: int = None) -> List[Chunk]:
+    def _apply_source_boost(self, fused: List[Tuple[int, float]], plan) -> List[Tuple[int, float]]:
+        """Boost (not filter) fused scores toward files the plan prefers, then
+        re-sort. A plan with no source that has file patterns (e.g. only
+        "code"/"git_history") is a no-op, so hybrid search behaves exactly as
+        before when the planner has nothing source-specific to say.
+
+        Also injects preferred-source files that BM25/dense missed entirely
+        (e.g. a Dockerfile has little lexical/semantic overlap with "how do I
+        deploy?") — otherwise plan preference would be capped by hybrid
+        recall, defeating the point of source-aware retrieval."""
+        if plan is None:
+            return fused
+        boosted = [
+            (idx, score + source_boost_score(self.chunks[idx].file, plan))
+            for idx, score in fused
+        ]
+        present = {idx for idx, _ in fused}
+        injected = [
+            (idx, source_boost_score(chunk.file, plan))
+            for idx, chunk in enumerate(self.chunks)
+            if idx not in present and source_boost_score(chunk.file, plan) > 0
+        ]
+        injected = self._dedupe_one_per_file(injected)
+        return sorted(boosted + injected, key=lambda x: x[1], reverse=True)
+
+    def search(self, query: str, plan=None, top_k: int = None, fetch_k: int = None) -> List[Chunk]:
         if not self.chunks:
             return []
         top_k = top_k or config.TOP_K
         fetch_k = fetch_k or config.FETCH_K
 
-        variants = self._query_variants(query) if (config.ENABLE_QUERY_EXPANSION or config.ENABLE_MULTI_QUERY) else [query]
+        variants = self._query_variants(query, plan) if (config.ENABLE_QUERY_EXPANSION or config.ENABLE_MULTI_QUERY) else [query]
 
         weighted_lists: List[Tuple[List[Tuple[int, float]], float]] = []
         for v in variants:
@@ -129,10 +158,21 @@ class HybridSearchIndex:
 
         fused = weighted_rrf(weighted_lists)
         fused = self._dedupe_one_per_file(fused)
+
+        # Fallback: if nothing in the fused list matches the plan's preferred
+        # sources, boosting is a no-op and we've already fallen back to plain
+        # hybrid search — we never filter candidates out, so results can't go
+        # empty just because a preferred source is missing from the repo.
+        fused = self._apply_source_boost(fused, plan)
+
         candidate_idxs = [idx for idx, _ in fused[:fetch_k]]
         candidates = [self.chunks[i] for i in candidate_idxs]
 
-        return self.reranker.rerank(query, candidates, top_k)
+        boosted_files = [c.file for c in candidates if source_boost_score(c.file, plan) > 0.0] if plan else []
+        self.last_boosted_files = boosted_files
+        self.last_retrieval_strategy = "source_boosting" if boosted_files else "hybrid_only"
+
+        return self.reranker.rerank(query, candidates, top_k, plan)
 
     def close(self):
         self.dense.close()
