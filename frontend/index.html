@@ -49,10 +49,26 @@
   .citation .loc { color: var(--accent); font-family: ui-monospace, monospace; margin-bottom: 4px; }
   .citation pre { margin: 0; white-space: pre-wrap; color: var(--muted); font-family: ui-monospace, monospace; }
   footer {
-    border-top: 1px solid var(--border); padding: 14px 20px; display: flex; gap: 10px;
+    border-top: 1px solid var(--border); padding: 14px 20px; display: flex; gap: 10px; align-items: center;
   }
   #question { flex: 1; }
+  .agent-toggle { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+  #budget { font-size: 12px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .trace { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+  .step {
+    font-family: ui-monospace, monospace; font-size: 12px; color: var(--muted);
+    border-left: 2px solid var(--border); padding: 2px 0 2px 8px;
+  }
+  .step.tool { color: var(--accent); border-left-color: var(--accent); }
+  .step.llm { border-left-color: #6cd48c; }
+  .diagram { margin: 12px 0; overflow-x: auto; background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; }
+  .diagram svg { max-width: 100%; height: auto; }
+  table.arch { border-collapse: collapse; font-size: 12px; width: 100%; margin-top: 8px; }
+  table.arch th, table.arch td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; vertical-align: top; }
+  table.arch th { color: var(--muted); font-weight: 600; }
+  ul.arch { font-size: 12px; margin: 4px 0 0; padding-left: 18px; }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
 </head>
 <body>
 <header>
@@ -67,6 +83,10 @@
 </header>
 <main id="chat"></main>
 <footer>
+  <label class="agent-toggle" title="Tool-calling agent: shows each LLM call and tool call live">
+    <input id="agentMode" type="checkbox" /> Agent mode
+  </label>
+  <span id="budget"></span>
   <input id="question" type="text" placeholder="Ask a question about the repo…" disabled />
   <button id="askBtn" disabled>Ask</button>
 </footer>
@@ -74,6 +94,7 @@
 <script>
 let sessionId = null;
 const $ = (id) => document.getElementById(id);
+if (window.mermaid) mermaid.initialize({ startOnLoad: false, theme: 'dark' });
 
 function apiBase() { return $('apiBase').value.replace(/\/$/, ''); }
 
@@ -135,10 +156,164 @@ $('graphBtn').addEventListener('click', async () => {
 
 $('archBtn').addEventListener('click', async () => {
   if (!sessionId) return;
-  const res = await fetch(`${apiBase()}/api/sessions/${sessionId}/architecture`);
-  const data = await res.json();
-  appendSystemBlock(`<div class="q">Architecture detection</div><div class="a">Patterns: ${data.likely_architecture_patterns.join(', ')}\nFrameworks/infra: ${data.detected_frameworks_and_infra.join(', ')}</div>`);
+  $('archBtn').disabled = true;
+  $('status').textContent = 'Analyzing architecture…';
+  try {
+    const res = await fetch(`${apiBase()}/api/sessions/${sessionId}/architecture`);
+    if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+    const a = await res.json();
+
+    const rows = a.components.map(c => `<tr>
+      <td title="${escapeHtml(c.name)}">${escapeHtml(c.label)}</td><td>${c.files}</td>
+      <td>${escapeHtml((c.key_symbols || []).join(', '))}</td>
+      <td>${escapeHtml((c.depends_on || []).map(n => (a.components.find(x => x.name === n) || {}).label || n).join(', '))}</td></tr>`).join('');
+    const entries = a.entry_points.map(e => `<li>${escapeHtml(e.file)} <span style="color:var(--muted)">— ${escapeHtml(e.why)}</span></li>`).join('');
+    const badge = a.explanation_mode === 'generative' ? 'mode-generative' : 'mode-extractive';
+
+    document.getElementById('archBlock')?.remove();  // a repeat click replaces the block
+    appendSystemBlock(`
+      <div class="q">Architecture <span class="mode-badge ${badge}">${a.explanation_mode}</span></div>
+      <div class="a"><b>Pattern:</b> ${escapeHtml(a.likely_architecture_patterns.join(', '))}
+<b>Stack:</b> ${escapeHtml(a.detected_frameworks_and_infra.join(', '))}</div>
+      <div class="a" style="margin-top:10px">${escapeHtml(a.explanation)}</div>
+      <div class="diagram" id="archDiagram"></div>
+      <table class="arch"><tr><th>Component</th><th>Files</th><th>Key symbols</th><th>Depends on</th></tr>${rows}</table>
+      ${entries ? `<div class="a" style="margin-top:10px"><b>Entry points</b></div><ul class="arch">${entries}</ul>` : ''}`);
+    $('chat').lastElementChild.id = 'archBlock';
+
+    // Diagram: rendered with Mermaid when its script loaded, otherwise shown as source.
+    const target = document.getElementById('archDiagram');
+    try {
+      const { svg } = await window.mermaid.render('archSvg' + Date.now(), a.diagram);
+      target.innerHTML = svg;
+    } catch (_) {
+      target.innerHTML = `<pre style="white-space:pre-wrap;color:var(--muted)">${escapeHtml(a.diagram)}</pre>`;
+    }
+    $('status').textContent = '';
+  } catch (e) {
+    $('status').textContent = `Error: ${e.message}`;
+  } finally {
+    $('archBtn').disabled = false;
+  }
 });
+
+// Reads a server-sent-events response and hands each parsed event to onEvent.
+async function readEvents(res, onEvent) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { value, done: eof } = await reader.read();
+    if (eof) break;
+    buffer += decoder.decode(value, { stream: true });
+    let end;
+    while ((end = buffer.indexOf('\n\n')) >= 0) {
+      const event = JSON.parse(buffer.slice(0, end).replace(/^data: /, ''));
+      buffer = buffer.slice(end + 2);
+      onEvent(event);
+    }
+    $('chat').scrollTop = $('chat').scrollHeight;
+  }
+}
+
+function renderAnswer(turn, question, data) {
+  const badgeClass = data.mode === 'generative' ? 'mode-generative' : 'mode-extractive';
+  let citationsHtml = '';
+  for (const c of data.citations) {
+    const meta = c.author ? ` · ${escapeHtml(c.author)} (${c.commit_sha || ''})` : '';
+    citationsHtml += `<div class="citation">
+      <div class="loc">${escapeHtml(c.file)}:${c.start_line}-${c.end_line}${c.symbol ? ' — ' + escapeHtml(c.symbol) : ''}${meta}</div>
+      <pre>${escapeHtml(c.snippet)}</pre>
+    </div>`;
+  }
+  const debug = data.llm_debug || {};
+  const debugLine = `provider: ${debug.provider} · model: ${debug.model} · key present: ${debug.api_key_present} · status: ${debug.status}${debug.error ? ' · error: ' + escapeHtml(debug.error) : ''}`;
+  const planLine = (data.plan_sources || []).length ? `planned sources: ${data.plan_sources.join(', ')}` : '';
+
+  turn.innerHTML = `
+    <div class="q">${escapeHtml(question)}
+      <span class="mode-badge ${badgeClass}">${data.mode}</span>
+    </div>
+    <div class="a">${escapeHtml(data.answer)}</div>
+    <div class="citations">${citationsHtml}</div>
+    <div style="font-size:11px;color:var(--muted);margin-top:8px">${debugLine}${planLine ? ' · ' + planLine : ''}</div>
+  `;
+}
+
+// Plain retrieval + one answer call (/api/query, streamed).
+async function askRag(question, turn) {
+  const answerEl = turn.querySelector('.a');
+  const res = await fetch(`${apiBase()}/api/query`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, question, stream: true }),
+  });
+  if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+
+  let answer = '', sources = null, done = null;
+  await readEvents(res, (event) => {
+    if (event.type === 'sources') { sources = event; answerEl.textContent = ''; }
+    else if (event.type === 'token') { answer += event.text; answerEl.textContent = answer; }
+    else if (event.type === 'done') { done = event; }
+  });
+  if (!done) throw new Error('stream ended before the answer finished');
+  renderAnswer(turn, question, {
+    answer: done.answer, mode: done.mode, llm_debug: done.llm_debug,
+    citations: sources.citations, plan_sources: sources.plan_sources,
+  });
+}
+
+function setBudget(used, limit) {
+  $('budget').textContent = `RPM ${used}/${limit} (last 60s)`;
+}
+
+function addStep(trace, text, cls = '') {
+  const step = document.createElement('div');
+  step.className = `step ${cls}`;
+  step.textContent = text;
+  trace.appendChild(step);
+}
+
+// Tool-calling agent (/api/chat, streamed): every LLM call and tool call shows up as it happens.
+async function askAgent(question, turn) {
+  const answerEl = turn.querySelector('.a');
+  const trace = document.createElement('div');
+  trace.className = 'trace';
+  answerEl.before(trace);
+  answerEl.textContent = 'Agent working…';
+
+  const res = await fetch(`${apiBase()}/api/chat`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, message: question, stream: true }),
+  });
+  if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+
+  let sources = null, done = null;
+  await readEvents(res, (event) => {
+    if (event.type === 'sources') {
+      sources = event;
+      setBudget(0, event.rpm_limit);
+      addStep(trace, `retrieved ${event.citations.length} excerpts · tool budget ${event.tool_calls_max}`);
+    } else if (event.type === 'llm_turn') {
+      setBudget(event.rpm_used, event.rpm_limit);
+      addStep(trace, `LLM call ${event.n} · RPM ${event.rpm_used}/${event.rpm_limit}`, 'llm');
+    } else if (event.type === 'tool_call') {
+      const args = Object.entries(event.args).map(([k, v]) => `${k}=${v}`).join(', ');
+      addStep(trace, `tool ${event.n}/${event.tool_calls_max}  ${event.name}(${args})`, 'tool');
+    } else if (event.type === 'fallback') {
+      addStep(trace, `ADK unavailable, using direct workflow: ${event.reason}`);
+    } else if (event.type === 'done') {
+      done = event;
+    }
+  });
+  if (!done) throw new Error('stream ended before the answer finished');
+
+  renderAnswer(turn, question, {
+    answer: done.answer, mode: done.mode, llm_debug: done.llm_debug,
+    citations: sources.citations, plan_sources: [],
+  });
+  turn.querySelector('.q').after(trace);  // keep the trace above the answer
+  addStep(trace, `done · ${done.llm_turns} LLM calls · ${done.tool_calls.length} tool calls · framework ${done.agent_framework}`);
+}
 
 async function ask() {
   const question = $('question').value.trim();
@@ -154,34 +329,8 @@ async function ask() {
   chat.scrollTop = chat.scrollHeight;
 
   try {
-    const res = await fetch(`${apiBase()}/api/query`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: sessionId, question }),
-    });
-    if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
-    const data = await res.json();
-
-    const badgeClass = data.mode === 'generative' ? 'mode-generative' : 'mode-extractive';
-    let citationsHtml = '';
-    for (const c of data.citations) {
-      const meta = c.author ? ` · ${escapeHtml(c.author)} (${c.commit_sha || ''})` : '';
-      citationsHtml += `<div class="citation">
-        <div class="loc">${escapeHtml(c.file)}:${c.start_line}-${c.end_line}${c.symbol ? ' — ' + escapeHtml(c.symbol) : ''}${meta}</div>
-        <pre>${escapeHtml(c.snippet)}</pre>
-      </div>`;
-    }
-    const debug = data.llm_debug || {};
-    const debugLine = `provider: ${debug.provider} · model: ${debug.model} · key present: ${debug.api_key_present} · status: ${debug.status}${debug.error ? ' · error: ' + escapeHtml(debug.error) : ''}`;
-    const planLine = (data.plan_sources || []).length ? `planned sources: ${data.plan_sources.join(', ')}` : '';
-
-    turn.innerHTML = `
-      <div class="q">${escapeHtml(question)}
-        <span class="mode-badge ${badgeClass}">${data.mode}</span>
-      </div>
-      <div class="a">${escapeHtml(data.answer)}</div>
-      <div class="citations">${citationsHtml}</div>
-      <div style="font-size:11px;color:var(--muted);margin-top:8px">${debugLine}${planLine ? ' · ' + planLine : ''}</div>
-    `;
+    if ($('agentMode').checked) await askAgent(question, turn);
+    else await askRag(question, turn);
   } catch (e) {
     turn.querySelector('.a').textContent = `Error: ${e.message}`;
   } finally {

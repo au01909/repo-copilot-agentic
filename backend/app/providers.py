@@ -7,9 +7,9 @@ that's the real, documented way both providers recommend integrating them.
 """
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Iterator, List, Optional, Tuple
 
-from . import config
+from . import config, rate_limit
 
 
 @dataclass
@@ -96,6 +96,8 @@ def complete(system: str, user_msg: str) -> Tuple[str, LLMDebugInfo]:
     provider = config.LLM_PROVIDER
     debug = get_active_provider_debug()
     start = time.time()
+    if provider == "nvidia":
+        rate_limit.limiter.acquire()
     try:
         if provider == "anthropic":
             text = _anthropic_complete(system, user_msg)
@@ -117,6 +119,37 @@ def complete(system: str, user_msg: str) -> Tuple[str, LLMDebugInfo]:
         debug.status = "error"
         debug.error = str(e)
         raise ProviderUnavailable(str(e)) from e
+
+
+def stream_complete(system: str, user_msg: str) -> Iterator[str]:
+    """Yield answer text as the provider produces it. Raises ProviderUnavailable
+    if no provider is usable; other errors propagate to the caller."""
+    provider = config.LLM_PROVIDER
+    if provider == "anthropic":
+        import anthropic
+        if not config.ANTHROPIC_API_KEY:
+            raise ProviderUnavailable("ANTHROPIC_API_KEY is not set")
+        client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        with client.messages.stream(
+            model=config.ANTHROPIC_MODEL, max_tokens=1000, system=system,
+            messages=[{"role": "user", "content": user_msg}],
+        ) as stream:
+            yield from stream.text_stream
+        return
+    if provider in _PROVIDER_TABLE:
+        if provider == "nvidia":
+            rate_limit.limiter.acquire()
+        base_url, api_key, model = _PROVIDER_TABLE[provider]()
+        client = _openai_compatible_client(base_url, api_key)
+        stream = client.chat.completions.create(
+            model=model, max_tokens=1000, stream=True,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user_msg}],
+        )
+        for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
+        return
+    raise ProviderUnavailable(f"Streaming is not available for LLM_PROVIDER '{provider}'")
 
 
 def is_configured() -> bool:

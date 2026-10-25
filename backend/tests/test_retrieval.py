@@ -48,3 +48,12 @@ def test_chunks_to_documents_preserves_git_metadata(repo_chunks):
     for doc in docs:
         assert "commit_sha" in doc.metadata
         assert "author" in doc.metadata
+
+
+def test_tree_sitter_chunker_keeps_top_level_requires():
+    from app.chunking import chunk_file
+    src = "const express = require('express');\nconst util = require('./util');\n\nfunction handler(req, res) {\n  return 1;\n}\n"
+    chunks = chunk_file("r", "a.js", "javascript", src)
+    text = "\n".join(c.content for c in chunks)
+    assert "require('./util')" in text
+    assert any(c.symbol == "handler" for c in chunks)

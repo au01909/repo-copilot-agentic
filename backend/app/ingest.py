@@ -10,10 +10,14 @@ SUPPORTED_EXTENSIONS = {
     ".ts", ".tsx", ".js", ".jsx",
     ".md", ".markdown", ".yaml", ".yml", ".json",
     ".dockerfile", ".tf", ".sql",
+    ".rb", ".php", ".cs", ".kt", ".swift",
 }
 
 SUPPORTED_FILENAMES = {
     "Dockerfile", "README", "README.md", "LICENSE", "Makefile",
+    # dependency manifests: the architecture view reads the tech stack from these
+    "requirements.txt", "pyproject.toml", "setup.cfg", "Pipfile", "go.mod",
+    "Cargo.toml", "pom.xml", "build.gradle", "build.gradle.kts", "Gemfile",
 }
 
 IGNORE_DIRS = {
@@ -50,6 +54,7 @@ def _detect_language(path: str) -> str:
         ".md": "markdown", ".markdown": "markdown",
         ".yaml": "yaml", ".yml": "yaml", ".json": "json",
         ".tf": "terraform", ".sql": "sql",
+        ".rb": "ruby", ".php": "php", ".cs": "csharp", ".kt": "kotlin", ".swift": "swift",
     }
     if name == "Dockerfile":
         return "dockerfile"

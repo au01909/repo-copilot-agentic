@@ -5,7 +5,7 @@ On any failure — missing key, network error, bad response — falls back to an
 extractive answer instead of crashing, and reports why via LLMDebugInfo.
 """
 from dataclasses import asdict
-from typing import List, Tuple
+from typing import Iterator, List, Tuple
 
 from . import providers
 from .chunking import Chunk
@@ -93,3 +93,31 @@ def generate_answer(
     debug = providers.get_active_provider_debug()
     answer = _extractive_answer(chunks, reason="no LLM provider configured")
     return answer, citations, "extractive", asdict(debug)
+
+
+def stream_answer(
+    question: str, chunks: List[Chunk], history: List[Tuple[str, str]],
+    repo_context: str = "",
+) -> Iterator[Tuple[str, str]]:
+    """Yields ("token", text) pieces as they arrive, then one ("done", mode).
+    Same prompt and fallback behaviour as generate_answer."""
+    if not providers.is_configured():
+        yield "token", _extractive_answer(chunks, reason="no LLM provider configured")
+        yield "done", "extractive"
+        return
+
+    user_msg = _build_user_message(question, chunks, history, repo_context)
+    emitted = False
+    try:
+        for piece in providers.stream_complete(SYSTEM_PROMPT, user_msg):
+            emitted = True
+            yield "token", piece
+        yield "done", "generative"
+    except Exception as e:
+        reason = f"LLM call failed ({e})"
+        if emitted:
+            # Partial generative answer already shown; say so rather than hide it.
+            yield "token", f"\n\n[stream interrupted: {e}]"
+        else:
+            yield "token", _extractive_answer(chunks, reason=reason)
+        yield "done", "extractive"

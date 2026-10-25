@@ -40,6 +40,7 @@ class QueryRequest(BaseModel):
     session_id: str
     question: str
     top_k: Optional[int] = None
+    stream: bool = False  # True: text/event-stream of sources, tokens, then done
 
 
 class Citation(BaseModel):
@@ -77,6 +78,7 @@ class ChatRequest(BaseModel):
     session_id: str
     message: str
     top_k: Optional[int] = None
+    stream: bool = False  # ADK path only: text/event-stream of each agent step, then done
 
 
 class ChatResponse(BaseModel):
@@ -123,6 +125,15 @@ class ArchitectureResponse(BaseModel):
     likely_architecture_patterns: List[str]
     detected_frameworks_and_infra: List[str]
     signal_strength: Dict
+    components: List[Dict] = []
+    entry_points: List[Dict] = []
+    dependencies: List[str] = []
+    external_imports: List[str] = []
+    compose_services: List[str] = []
+    top_level: Dict = {}
+    diagram: str = ""            # Mermaid flowchart, built from the evidence
+    explanation: str = ""
+    explanation_mode: str = "extractive"  # generative (LLM) | extractive (plain facts)
 
 
 class IssueSummary(BaseModel):

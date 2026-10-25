@@ -71,3 +71,23 @@ def test_query_endpoint_still_works(indexed_session):
 def test_unknown_session_returns_404():
     resp = client.post("/api/chat", json={"session_id": "does-not-exist", "message": "hi"})
     assert resp.status_code == 404
+
+
+def test_query_stream_emits_sources_tokens_then_done(indexed_session):
+    import json
+    with client.stream("POST", "/api/query", json={
+        "session_id": indexed_session, "question": "What does the Value class do?", "stream": True,
+    }) as resp:
+        assert resp.status_code == 200
+        events = [json.loads(line[6:]) for line in resp.iter_lines() if line.startswith("data: ")]
+    assert events[0]["type"] == "sources" and events[0]["citations"]
+    assert events[-1]["type"] == "done" and events[-1]["answer"]
+    assert "".join(e["text"] for e in events if e["type"] == "token") == events[-1]["answer"]
+
+
+def test_session_is_restored_after_restart(indexed_session):
+    from app.main import SESSIONS
+    SESSIONS.pop(indexed_session)  # simulate a restart: store still has the session
+    resp = client.post("/api/query", json={"session_id": indexed_session, "question": "What is micrograd?"})
+    assert resp.status_code == 200
+    assert indexed_session in SESSIONS

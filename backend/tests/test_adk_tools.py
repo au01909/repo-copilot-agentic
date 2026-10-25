@@ -22,21 +22,21 @@ def test_search_repository_tool_returns_grounded_results(tool_context):
 
 def test_read_repository_file_tool_reads_real_content(tool_context):
     _, read_repository_file, *_ = bind_repository_tools(tool_context)
-    result = read_repository_file(TEST_REPO_URL, "micrograd/engine.py", 1, 5)
+    result = read_repository_file(file_path="micrograd/engine.py", repo_url=TEST_REPO_URL, start_line=1, end_line=5)
     assert "content" in result
     assert "class Value" in result["content"] or "Value" in result["content"]
 
 
 def test_read_repository_file_blocks_path_traversal(tool_context):
     _, read_repository_file, *_ = bind_repository_tools(tool_context)
-    result = read_repository_file(TEST_REPO_URL, "../../../etc/passwd")
+    result = read_repository_file(file_path="../../../etc/passwd", repo_url=TEST_REPO_URL)
     assert "error" in result
     assert "escapes" in result["error"]
 
 
 def test_read_repository_file_rejects_unknown_repo(tool_context):
     _, read_repository_file, *_ = bind_repository_tools(tool_context)
-    result = read_repository_file("https://github.com/not/indexed.git", "README.md")
+    result = read_repository_file(file_path="README.md", repo_url="https://github.com/not/indexed.git")
     assert "error" in result
 
 
@@ -64,3 +64,25 @@ def test_adk_agent_raises_clean_error_without_nvidia_key(tool_context, monkeypat
     monkeypatch.setattr("app.config.NVIDIA_NIM_API_KEY", None)
     with pytest.raises(ADKAgentUnavailable):
         build_repository_agent(tool_context)
+
+
+def test_agent_caps_tool_calls_per_answer(monkeypatch):
+    from app import config
+    from app.agent.repository_agent import build_repository_agent
+    from app.agent.tools import RepoToolContext
+
+    monkeypatch.setattr(config, "NVIDIA_NIM_API_KEY", "test-key")  # builds the agent, no network call
+    monkeypatch.setattr(config, "AGENT_MAX_TOOL_CALLS", 2)
+    agent = build_repository_agent(RepoToolContext(None, [], {}))
+
+    results = [agent.before_tool_callback(None, {}, None) for _ in range(3)]
+    assert results[0] is None and results[1] is None  # first two tool calls run
+    assert "budget" in results[2]["error"]            # third is refused, model must answer
+
+
+def test_read_repository_file_tolerates_url_variants_and_missing_repo_url(tool_context):
+    _, read_repository_file, *_ = bind_repository_tools(tool_context)
+    bare = TEST_REPO_URL.removesuffix(".git")  # what a model writes: no ".git"
+    for kwargs in ({"repo_url": bare}, {"repo_url": bare.upper() + "/"}, {}):
+        result = read_repository_file(file_path="micrograd/engine.py", start_line=1, end_line=5, **kwargs)
+        assert "content" in result, (kwargs, result)

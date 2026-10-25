@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass, field
 from typing import List
 
-from . import providers
+from . import config, providers
 from .providers import ProviderUnavailable
 
 PLANNER_PROMPT = """Given a question about a code repository, decide which of these \
@@ -60,7 +60,8 @@ def _heuristic_plan(question: str) -> Plan:
 
 
 def plan(question: str) -> Plan:
-    if not providers.is_configured():
+    # ENABLE_AGENTIC_PLANNER=false skips the LLM planning round-trip (~4s per question)
+    if not config.ENABLE_AGENTIC_PLANNER or not providers.is_configured():
         return _heuristic_plan(question)
     try:
         text, _debug = providers.complete(PLANNER_PROMPT, question)

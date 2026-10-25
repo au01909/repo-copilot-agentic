@@ -67,3 +67,7 @@ Thumbs.db
 node_modules/
 npm-debug.log*
 dist/
+
+# browser-test tool output (screenshots that belong in the README live in docs/screenshots/)
+.playwright-mcp/
+

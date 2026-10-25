@@ -182,7 +182,23 @@ def chunk_tree_sitter(repo: str, file: str, language: str, content: str) -> List
 
     if not chunks:
         return chunk_generic(repo, file, language, content)
-    return chunks
+
+    # Top-level code the definitions don't cover (imports, requires, constants,
+    # `exports.x = ...`), kept like chunk_python's module chunk. Without it a file's
+    # imports are never indexed. Blocks are window-sized so one big script isn't one chunk.
+    covered = set()
+    for c in chunks:
+        covered.update(range(c.start_line, c.end_line + 1))
+    leftover = [i for i in range(1, len(lines) + 1) if i not in covered and lines[i - 1].strip()]
+    module_chunks = []
+    for j in range(0, len(leftover), FIXED_WINDOW_LINES):
+        block = leftover[j:j + FIXED_WINDOW_LINES]
+        module_chunks.append(Chunk(
+            repo=repo, file=file, language=language,
+            content="\n".join(lines[i - 1] for i in block),
+            start_line=block[0], end_line=block[-1], symbol="<module>", kind="module",
+        ))
+    return module_chunks + chunks
 
 
 def chunk_generic(repo: str, file: str, language: str, content: str) -> List[Chunk]:

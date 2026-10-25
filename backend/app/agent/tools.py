@@ -66,23 +66,35 @@ def bind_repository_tools(ctx: RepoToolContext):
             for c in chunks
         ]}
 
-    def read_repository_file(repo_url: str, file_path: str, start_line: Optional[int] = None,
+    def _normalize_url(url: str) -> str:
+        return url.strip().lower().removesuffix("/").removesuffix(".git").removesuffix("/")
+
+    def read_repository_file(file_path: str, repo_url: Optional[str] = None,
+                              start_line: Optional[int] = None,
                               end_line: Optional[int] = None) -> Dict:
         """Read a specific file (or line range) from an indexed repository.
 
         Args:
-            repo_url: the repository this session indexed (must match a repo
-                already added to this session — arbitrary paths are rejected).
             file_path: path relative to the repository root.
+            repo_url: which indexed repository to read from. Optional when the
+                session has a single repository; matching ignores a trailing
+                ".git" or "/". Arbitrary paths outside indexed repos are rejected.
             start_line: optional 1-indexed start line.
             end_line: optional 1-indexed end line (inclusive).
 
         Returns:
             A dict with "content" (str) or "error" (str).
         """
-        local_dir = ctx.local_dirs.get(repo_url)
-        if not local_dir:
-            return {"error": f"{repo_url} is not part of this session"}
+        if repo_url:
+            wanted = _normalize_url(repo_url)
+            local_dir = next((d for u, d in ctx.local_dirs.items() if _normalize_url(u) == wanted), None)
+            if not local_dir:
+                return {"error": f"{repo_url} is not part of this session; indexed: {', '.join(ctx.local_dirs)}"}
+        elif len(ctx.local_dirs) == 1:
+            local_dir = next(iter(ctx.local_dirs.values()))
+        else:
+            return {"error": f"repo_url is required: this session has {len(ctx.local_dirs)} repositories: "
+                             f"{', '.join(ctx.local_dirs)}"}
 
         # resolve and verify the path stays inside the clone (no path traversal)
         abs_path = os.path.realpath(os.path.join(local_dir, file_path))

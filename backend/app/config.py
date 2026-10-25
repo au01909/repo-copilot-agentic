@@ -120,6 +120,13 @@ AGENT_FRAMEWORK = os.environ.get("AGENT_FRAMEWORK", "adk").lower()
 # workflow directly, skipping the ADK tool-calling wrapper — useful if ADK or
 # its model backend isn't configured, e.g. no NVIDIA_NIM_API_KEY)
 AGENT_MAX_RETRIES = int(os.environ.get("AGENT_MAX_RETRIES", "2"))
+# Hard cap on tool calls per /api/chat answer; retrieved context is passed in up front,
+# so most questions should need 0-2 tool calls. Each tool call is one model round-trip.
+AGENT_MAX_TOOL_CALLS = int(os.environ.get("AGENT_MAX_TOOL_CALLS", "3"))
+# NVIDIA NIM free tier: 40 requests per minute, shared by all NVIDIA calls.
+NVIDIA_RPM_LIMIT = int(os.environ.get("NVIDIA_RPM_LIMIT", "40"))
+# Retries on HTTP 429 for ADK model calls (exponential backoff inside LiteLLM).
+NVIDIA_MAX_RETRIES = int(os.environ.get("NVIDIA_MAX_RETRIES", "5"))
 
 # --- Repository ingestion limits (untrusted input) ---
 MAX_REPOSITORY_SIZE_MB = int(os.environ.get("MAX_REPOSITORY_SIZE", "100"))

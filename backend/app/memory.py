@@ -8,13 +8,6 @@ useful for "what does refresh token handling look like" as a follow-up to
 from dataclasses import dataclass, field
 from typing import List, Tuple
 
-from . import providers
-from .providers import ProviderUnavailable
-
-SUMMARY_PROMPT = """Summarize this conversation about a code repository in 2-3 \
-sentences, focused on what topics/files have already been discussed so future \
-questions can build on that context."""
-
 
 @dataclass
 class ConversationMemory:
@@ -30,17 +23,11 @@ class ConversationMemory:
         self._update_summary()
 
     def _update_summary(self):
+        # No LLM call here: this runs on the request path after every answer,
+        # so an extra model round-trip would make each reply slower. The topic
+        # list is enough context for follow-up questions.
         if len(self.history) < 2:
             return
-        if providers.is_configured():
-            try:
-                transcript = "\n".join(f"Q: {q}\nA: {a[:300]}" for q, a in self.history[-6:])
-                text, _debug = providers.complete(SUMMARY_PROMPT, transcript)
-                self.running_summary = text.strip()
-                return
-            except ProviderUnavailable:
-                pass
-        # naive fallback: just note the topics (question texts) covered so far
         topics = "; ".join(q for q, _ in self.history[-6:])
         self.running_summary = f"Topics discussed so far: {topics}"
 

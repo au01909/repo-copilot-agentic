@@ -1,16 +1,18 @@
+import json
 import shutil
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 from . import (architecture_detect, chunking, code_exec, config, eval_dataset_gen,
                eval_deepeval, eval_judge, eval_ragas, eval_stub, github_integration,
-               incremental, ingest, llm, memory, persistence, planner, providers)
-from .agent.repository_agent import ADKAgentUnavailable, run_adk_agent
+               incremental, ingest, llm, memory, persistence, planner, providers, rate_limit)
+from .agent.repository_agent import ADKAgentUnavailable, iter_adk_agent, run_adk_agent
 from .agent.tools import RepoToolContext
 from .agent.workflow import run_workflow
 from .chunking import Chunk
@@ -80,8 +82,26 @@ def _rebuild_index(session: Session):
 
 def _get_session(session_id: str) -> Session:
     session = SESSIONS.get(session_id)
-    if not session:
+    if session:
+        return session
+    if not session_store.session_exists(session_id):
         raise HTTPException(404, "Unknown session_id. Call /api/index first.")
+    return _restore_session(session_id)
+
+
+def _restore_session(session_id: str) -> Session:
+    """A session survives a server restart in the store (repo URLs + turns), but
+    the in-memory index does not. Rebuild it under the same session_id: re-clone
+    and re-index its repos, then reload the conversation so follow-ups keep context."""
+    session = Session()
+    for repo_url in session_store.get_repo_urls(session_id) or []:
+        repo_state, chunks = _ingest_repo(repo_url)
+        session.repos[repo_url] = repo_state
+        session.chunks += chunks
+    _rebuild_index(session)
+    for question, answer in session_store.get_history(session_id):
+        session.conversation.add_turn(question, answer, [])
+    SESSIONS[session_id] = session
     return session
 
 
@@ -195,6 +215,37 @@ def list_sessions():
 # Query (retrieval + planning + generation)
 # ---------------------------------------------------------------------------
 
+def _stream_query(session: Session, req: QueryRequest, plan, retrieved: List[Chunk], repo_context: str):
+    """SSE body for /api/query with stream=true: one 'sources' event (citations
+    and retrieval metadata), a 'token' event per piece of answer, then 'done'."""
+    def event(payload: dict) -> str:
+        return f"data: {json.dumps(payload)}\n\n"
+
+    yield event({
+        "type": "sources",
+        "citations": [c.model_dump() for c in _citations_from_chunks(retrieved)],
+        "plan_sources": plan.sources,
+        "retrieval_strategy": session.index.last_retrieval_strategy,
+        "boosted_files": session.index.last_boosted_files,
+    })
+
+    pieces, mode = [], "extractive"
+    for kind, value in llm.stream_answer(req.question, retrieved, session.conversation.history, repo_context):
+        if kind == "token":
+            pieces.append(value)
+            yield event({"type": "token", "text": value})
+        else:
+            mode = value
+
+    answer = "".join(pieces)
+    session.conversation.add_turn(req.question, answer, [c.file for c in retrieved])
+    session_store.append_turn(req.session_id, req.question, answer)
+    debug = providers.get_active_provider_debug()
+    debug.status = "success" if mode == "generative" else "error"
+    yield event({"type": "done", "answer": answer, "mode": mode,
+                 "llm_debug": asdict(debug), "retrieved_chunks": len(retrieved)})
+
+
 @app.post("/api/query", response_model=QueryResponse)
 def query_repository(req: QueryRequest):
     session = _get_session(req.session_id)
@@ -205,6 +256,12 @@ def query_repository(req: QueryRequest):
     retrieved = session.index.search(req.question, plan, top_k=req.top_k)
 
     repo_context = session.conversation.context_block()
+    if req.stream:
+        return StreamingResponse(
+            _stream_query(session, req, plan, retrieved, repo_context),
+            media_type="text/event-stream", headers={"Cache-Control": "no-cache"},
+        )
+
     answer, citations, mode, debug = llm.generate_answer(
         req.question, retrieved, session.conversation.history, repo_context=repo_context,
     )
@@ -226,6 +283,64 @@ def _build_tool_context(session: Session) -> RepoToolContext:
     return RepoToolContext(session.index, session.chunks, local_dirs)
 
 
+def _evidence_message(question: str, chunks: List[Chunk]) -> str:
+    """The question with the top retrieved excerpts, so the agent can answer
+    without spending a tool call on what retrieval already found."""
+    blocks = []
+    for i, c in enumerate(chunks, start=1):
+        # generous cap: a truncated excerpt makes the agent spend tool calls looking for the rest
+        body = c.content if len(c.content) <= 4000 else c.content[:4000] + "\n…"
+        blocks.append(f"[{i}] {c.file}:{c.start_line}-{c.end_line}\n```{c.language}\n{body}\n```")
+    return "Retrieved context:\n\n" + "\n\n".join(blocks) + f"\n\nQuestion: {question}"
+
+
+def _stream_chat(session: Session, req: ChatRequest):
+    """SSE body for /api/chat with stream=true (ADK path). Emits each step as the
+    agent takes it: llm_turn (one NVIDIA request, with the live RPM count),
+    tool_call (name and args), then the answer and a done summary."""
+    def event(payload: dict) -> str:
+        return f"data: {json.dumps(payload)}\n\n"
+
+    retrieved = session.index.search(req.message, top_k=req.top_k)
+    yield event({
+        "type": "sources",
+        "citations": [c.model_dump() for c in _citations_from_chunks(retrieved)],
+        "tool_calls_max": config.AGENT_MAX_TOOL_CALLS,
+        "rpm_limit": config.NVIDIA_RPM_LIMIT,
+    })
+
+    tool_calls: List[str] = []
+    turns, answer, framework, mode = 0, "", "adk", "generative"
+    try:
+        for item in iter_adk_agent(_build_tool_context(session), _evidence_message(req.message, retrieved)):
+            if item[0] == "model_turn":
+                turns = item[1]
+                yield event({"type": "llm_turn", "n": turns,
+                             "rpm_used": rate_limit.limiter.used(), "rpm_limit": config.NVIDIA_RPM_LIMIT})
+            elif item[0] == "tool_call":
+                tool_calls.append(item[1])
+                args = {k: str(v)[:200] for k, v in item[2].items()}
+                yield event({"type": "tool_call", "n": len(tool_calls), "name": item[1], "args": args,
+                             "tool_calls_max": config.AGENT_MAX_TOOL_CALLS})
+            else:
+                answer = item[1]
+        if not answer:
+            answer, mode = llm._extractive_answer(retrieved), "extractive"
+    except ADKAgentUnavailable as e:
+        yield event({"type": "fallback", "reason": str(e)})
+        wf = run_workflow(session.index, req.session_id, req.message,
+                          get_history=lambda sid: session.conversation.history)
+        answer, mode, framework = wf["answer"], wf["mode"], "direct"
+
+    yield event({"type": "token", "text": answer})
+    session.conversation.add_turn(req.message, answer, [c.file for c in retrieved])
+    session_store.append_turn(req.session_id, req.message, answer)
+    debug = providers.get_active_provider_debug()
+    debug.status = "success" if mode == "generative" else "error"
+    yield event({"type": "done", "answer": answer, "mode": mode, "agent_framework": framework,
+                 "tool_calls": tool_calls, "llm_turns": turns, "llm_debug": asdict(debug)})
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
     """The agentic entry point: `AGENT_FRAMEWORK=adk` (default) tries the
@@ -242,6 +357,12 @@ def chat(req: ChatRequest):
     if not session.index:
         raise HTTPException(400, "Session has no indexed repositories.")
 
+    if req.stream and config.AGENT_FRAMEWORK == "adk":
+        return StreamingResponse(
+            _stream_chat(session, req), media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
+        )
+
     provider_debug = providers.get_active_provider_debug()
 
     with track_query(req.session_id, req.message, provider_debug.provider, provider_debug.model) as run:
@@ -250,13 +371,10 @@ def chat(req: ChatRequest):
 
         if config.AGENT_FRAMEWORK == "adk":
             try:
-                ctx = _build_tool_context(session)
-                adk_result = run_adk_agent(ctx, req.message)
-                # ADK's own answer text, but still run our own retrieval pass so
-                # the citations returned to the client are grounded in the same
-                # chunk metadata (file/lines/commit) as the rest of the app,
-                # rather than re-parsing them out of the model's free text.
+                # Retrieve first and pass the excerpts in, so the agent usually
+                # answers without spending tool calls (each one is a model request).
                 retrieved = session.index.search(req.message, top_k=req.top_k)
+                adk_result = run_adk_agent(_build_tool_context(session), _evidence_message(req.message, retrieved))
                 result = {
                     "answer": adk_result["answer"] or llm._extractive_answer(retrieved),
                     "citations": _citations_from_chunks(retrieved),
@@ -330,9 +448,13 @@ def get_graph(session_id: str):
 
 
 @app.get("/api/sessions/{session_id}/architecture", response_model=ArchitectureResponse)
-def get_architecture(session_id: str):
+def get_architecture(session_id: str, explain: bool = True):
+    """Components, dependencies, entry points, stack and a Mermaid diagram derived from
+    the indexed files; plus a written explanation (one LLM call, skipped if explain=false)."""
     session = _get_session(session_id)
-    return ArchitectureResponse(**architecture_detect.detect(session.chunks))
+    result = architecture_detect.detect(session.chunks)
+    result.update(architecture_detect.describe(result, session.chunks, explain=explain))
+    return ArchitectureResponse(**result)
 
 
 _SUMMARY_EVIDENCE_FILENAMES = (
